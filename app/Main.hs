@@ -45,6 +45,7 @@ Measurement
   stanza Text
   module Text
   verb Text
+  payload Text
   deriving Show
 |]
 
@@ -131,7 +132,7 @@ collectMeasurements measurementTitle =
         Just line ->
           case lineVerb line of
             Configuring packageNameVer -> do
-              produce state'
+              produce state' ""
               collect state'
               where state' =
                       State
@@ -146,22 +147,23 @@ collectMeasurements measurementTitle =
                 Just packageStart -> do
                   yield
                     ( lineTimestamp line
-                    , \_ ->
-                        Measurement
-                          { measurementTitle
-                          , measurementTimestamp = packageStart
-                          , measurementDuration =
-                              realToFrac
-                                (diffUTCTime (lineTimestamp line) packageStart)
-                          , measurementPackage =
-                              maybe
-                                ""
-                                (T.decodeUtf8 . unPackageNameVer)
-                                (statePackageNameVer state)
-                          , measurementStanza = ""
-                          , measurementModule = ""
-                          , measurementVerb = "build-package"
-                          })
+                    , Right
+                        (Measurement
+                           { measurementTitle
+                           , measurementTimestamp = packageStart
+                           , measurementDuration =
+                               realToFrac
+                                 (diffUTCTime (lineTimestamp line) packageStart)
+                           , measurementPackage =
+                               maybe
+                                 ""
+                                 (T.decodeUtf8 . unPackageNameVer)
+                                 (statePackageNameVer state)
+                           , measurementStanza = ""
+                           , measurementModule = ""
+                           , measurementVerb = "build-package"
+                           , measurementPayload = ""
+                           }))
                   collect
                     State
                       { statePackageNameVer = Nothing
@@ -178,59 +180,66 @@ collectMeasurements measurementTitle =
             BuildingStanza stanzaName ->
               collect state {stateStanzaName = Just stanzaName}
             Compiling moduleName -> do
-              produce state'
+              produce state' ""
               collect state'
               where state' = state {stateModuleName = Just moduleName}
-            Linking _file -> do
-              produce state'
+            Linking file -> do
+              produce state' (T.pack file)
               collect state'
               where state' = state {stateModuleName = Nothing}
-            Unknown -> do
-              produce state
+            Unknown payload -> do
+              produce state payload
               collect state
-          where produce state' =
+          where produce state' payload =
                   yield
                     ( lineTimestamp line
-                    , (\duration ->
-                         Measurement
-                           { measurementTitle
-                           , measurementTimestamp = lineTimestamp line
-                           , measurementDuration = duration
-                           , measurementPackage =
-                               maybe
-                                 ""
-                                 (T.decodeUtf8 . unPackageNameVer)
-                                 (statePackageNameVer state')
-                           , measurementStanza =
-                               maybe
-                                 ""
-                                 (T.decodeUtf8 . unStanzaName)
-                                 (stateStanzaName state')
-                           , measurementModule =
-                               maybe
-                                 ""
-                                 (T.decodeUtf8 . unModuleName)
-                                 (stateModuleName state')
-                           , measurementVerb =
-                               case lineVerb line of
-                                 Configuring {} -> "configure"
-                                 Registering {} -> "register"
-                                 BuildingLibrary -> "build-library"
-                                 BuildingStanza {} -> "build-stanza"
-                                 Compiling {} -> "compile"
-                                 Linking {} -> "link"
-                                 Unknown {} -> "unknown"
-                           }))
+                    , Left
+                        (\duration ->
+                           Measurement
+                             { measurementTitle
+                             , measurementTimestamp = lineTimestamp line
+                             , measurementDuration = duration
+                             , measurementPayload = payload
+                             , measurementPackage =
+                                 maybe
+                                   ""
+                                   (T.decodeUtf8 . unPackageNameVer)
+                                   (statePackageNameVer state')
+                             , measurementStanza =
+                                 maybe
+                                   ""
+                                   (T.decodeUtf8 . unStanzaName)
+                                   (stateStanzaName state')
+                             , measurementModule =
+                                 maybe
+                                   ""
+                                   (T.decodeUtf8 . unModuleName)
+                                   (stateModuleName state')
+                             , measurementVerb =
+                                 case lineVerb line of
+                                   Configuring {} -> "configure"
+                                   Registering {} -> "register"
+                                   BuildingLibrary -> "build-library"
+                                   BuildingStanza {} -> "build-stanza"
+                                   Compiling {} -> "compile"
+                                   Linking {} -> "link"
+                                   Unknown {} -> "unknown"
+                             }))
     diff mprevious = do
       mthis <- await
       case mthis of
-        Nothing -> pure ()
+        Nothing ->
+          case mprevious of
+            Just (_, Right measurement) -> yield measurement
+            _ -> pure ()
         Just (thisTimestamp, _thisMeasurement) ->
           case mprevious of
-            Just (previousTimestamp, previousMeasurement) -> do
+            Just (previousTimestamp, eitherPreviousMeasurement) -> do
               yield
-                (previousMeasurement
-                   (realToFrac (diffUTCTime thisTimestamp previousTimestamp)))
+                (either
+                   ($ realToFrac (diffUTCTime thisTimestamp previousTimestamp))
+                   id
+                   eitherPreviousMeasurement)
               diff mthis
             Nothing -> diff mthis
 
@@ -251,7 +260,7 @@ data Verb
   | Compiling ModuleName
   | Linking FilePath
   | Registering
-  | Unknown
+  | Unknown Text
   deriving (Show)
 
 newtype PackageNameVer =
@@ -333,7 +342,7 @@ verbParser =
     registering = do
       _ <- Atto.string "Registering "
       pure Registering
-    unknown = pure Unknown
+    unknown = Unknown . T.pack . S8.unpack <$> Atto.takeByteString
 
 packageNameVerParser :: Atto.Parser PackageNameVer
 packageNameVerParser =
