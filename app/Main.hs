@@ -58,29 +58,49 @@ data Config =
 -- | Main entry point.
 main :: IO ()
 main = do
-  (config, ()) <-
+  ((), cmd) <-
     simpleOptions
       "0"
       "build-profile"
       "build-profile"
-      (do configTitle <-
-            fmap
-              T.pack
-              (strOption
-                 (long "title" <> help "Title for this build" <> metavar "TEXT"))
-          configSqliteFile <-
-            fmap
-              T.pack
-              (strOption
-                 (long "sqlite-file" <>
-                  help "Filepath to use for sqlite database" <>
-                  metavar "PATH" <>
-                  value "profile.sqlite3"))
-          configLogFiles <-
-            some (strArgument (help "Log file path" <> metavar "PATH"))
-          pure Config {..})
       (pure ())
-  runSqlite (configSqliteFile config) (runMigration migrateAll)
+      (addCommand
+         "generate"
+         "Generate a database of the profile"
+         generate
+         (do configTitle <-
+               fmap
+                 T.pack
+                 (strOption
+                    (long "title" <> help "Title for this build" <>
+                     metavar "TEXT"))
+             configSqliteFile <-
+               fmap
+                 T.pack
+                 (strOption
+                    (long "sqlite-file" <>
+                     help "Filepath to use for sqlite database" <>
+                     metavar "PATH" <>
+                     value "profile.sqlite3"))
+             configLogFiles <-
+               some (strArgument (help "Log file path" <> metavar "PATH"))
+             pure Config {..}))
+  cmd
+  where
+    generate config = do
+      runSqlite (configSqliteFile config) (runMigration migrateAll)
+      mapM_
+        (\fp ->
+           runConduitRes
+             (lineFileSource fp .| collectMeasurements (configTitle config) .|
+              CL.mapM_
+                (\measurement ->
+                   runSqlite
+                     (configSqliteFile config)
+                     (do asTypeOf
+                           (insert_ measurement)
+                           (runMigration migrateAll)))))
+        (configLogFiles config)
 
 --------------------------------------------------------------------------------
 -- Collector of measurements
@@ -171,12 +191,11 @@ collectMeasurements measurementTitle =
           where produce state' =
                   yield
                     ( lineTimestamp line
-                    , (\computeDuration ->
+                    , (\duration ->
                          Measurement
                            { measurementTitle
                            , measurementTimestamp = lineTimestamp line
-                           , measurementDuration =
-                               computeDuration (lineTimestamp line)
+                           , measurementDuration = duration
                            , measurementPackage =
                                maybe
                                  ""
@@ -202,14 +221,18 @@ collectMeasurements measurementTitle =
                                  Linking {} -> "link"
                                  Unknown {} -> "unknown"
                            }))
-    diff mprev = do
-      mmeasure <- await
-      case mmeasure of
+    diff mprevious = do
+      mthis <- await
+      case mthis of
         Nothing -> pure ()
-        Just (timestamp, makeMeasurement) -> do
-          maybe (pure ()) (yield . makeMeasurement . compute) mprev
-          diff (Just timestamp)
-          where compute before after = realToFrac (diffUTCTime after before)
+        Just (thisTimestamp, _thisMeasurement) ->
+          case mprevious of
+            Just (previousTimestamp, previousMeasurement) -> do
+              yield
+                (previousMeasurement
+                   (realToFrac (diffUTCTime thisTimestamp previousTimestamp)))
+              diff mthis
+            Nothing -> diff mthis
 
 --------------------------------------------------------------------------------
 -- SAX lexer
