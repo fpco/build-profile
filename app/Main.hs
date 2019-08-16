@@ -13,7 +13,9 @@
 
 module Main where
 
+
 import           Control.Monad.Catch
+import           Control.Monad.Trans
 import           Control.Monad.Trans.Resource
 import qualified Data.Attoparsec.ByteString.Char8 as Atto
 import           Data.ByteString (ByteString)
@@ -87,6 +89,7 @@ data Line =
     { lineTimestamp :: !UTCTime
     , lineVerb :: !Verb
     }
+  deriving (Show)
 
 data Verb
   = Configuring PackageNameVer
@@ -95,6 +98,7 @@ data Verb
   | Compiling ModuleName
   | Linking FilePath
   | Unknown
+  deriving (Show)
 
 data Context =
   Context
@@ -102,28 +106,46 @@ data Context =
     , contextModuleName :: !(Maybe ModuleName)
     }
 
-newtype PackageNameVer = PackageNameVer {unPackageNameVer :: ByteString}
-newtype ModuleName = ModuleName {unModuleName :: ByteString}
-newtype StanzaName = StanzaName {unStanzaName :: ByteString}
+newtype PackageNameVer =
+  PackageNameVer
+    { unPackageNameVer :: ByteString
+    }
+  deriving (Show)
 
-lineFileSource :: FilePath -> ConduitT ByteString Line (ResourceT IO) ()
+newtype ModuleName =
+  ModuleName
+    { unModuleName :: ByteString
+    }
+  deriving (Show)
+
+newtype StanzaName =
+  StanzaName
+    { unStanzaName :: ByteString
+    }
+  deriving (Show)
+
+lineFileSource :: FilePath -> ConduitT () Line (ResourceT IO) ()
 lineFileSource fp = CB.sourceFile fp .| lineSource
 
-lineSource :: MonadThrow m => ConduitT ByteString Line m ()
-lineSource = CB.lines .| conduitParser lineParser .| CL.map snd
+lineSource :: ConduitT ByteString Line (ResourceT IO) ()
+lineSource =
+  CB.lines .| CL.mapM (\x -> lift (print x) >> pure x) .|
+  CL.mapM (either error pure . Atto.parseOnly lineParser)
 
 lineParser :: Atto.Parser Line
 lineParser = do
   timestamp <- Atto.takeWhile (not . isSpace)
-  case parseTimeM
+  Atto.skipSpace
+  line <- case parseTimeM
          False
          defaultTimeLocale
          "%Y-%m-%dT%H:%M:%S%Q"
          (S8.unpack timestamp) of
     Nothing -> fail ("Invalid timestamp: " <> show timestamp)
-    Just utctime ->
-      do verb <- verbParser
-         pure (Line {lineTimestamp = utctime, lineVerb = verb})
+    Just utctime -> do
+      verb <- verbParser
+      pure (Line {lineTimestamp = utctime, lineVerb = verb})
+  pure line
 
 verbParser :: Atto.Parser Verb
 verbParser =
@@ -143,13 +165,15 @@ verbParser =
       Atto.string "Building library"
       pure BuildingLibrary
     buildingstanza = do
-      Atto.string "Building '"
+      Atto.string "Building "
+      Atto.skipWhile (/='\'')
+      Atto.char '\''
       BuildingStanza <$> stanzaNameParser
     compiling = do
       Atto.char '['
       _ <- Atto.takeWhile (/= ']')
       Atto.char ']'
-      Atto.string " Compiling"
+      Atto.string " Compiling "
       Compiling <$> moduleNameParser
     linking = do
       Atto.string "Linking "
@@ -158,14 +182,14 @@ verbParser =
 
 packageNameVerParser =
   (PackageNameVer . stripEllipsis) <$>
-  Atto.takeWhile (\c -> isAlphaNum c || elem c ("-.":: [Char]))
+  Atto.takeWhile1 (\c -> isAlphaNum c || elem c ("-.":: [Char]))
 
 stanzaNameParser =
   (StanzaName . stripEllipsis) <$>
-  Atto.takeWhile (\c -> isAlphaNum c || elem c ("-" :: [Char]))
+  Atto.takeWhile1 (\c -> isAlphaNum c || elem c ("-_" :: [Char]))
 
 moduleNameParser =
   (ModuleName . stripEllipsis) <$>
-  Atto.takeWhile (\c -> isAlphaNum c || elem c ("'.":: [Char]))
+  Atto.takeWhile1 (\c -> isAlphaNum c || isUpper c || elem c ("_'.":: [Char]))
 
 stripEllipsis x = fromMaybe x (S8.stripSuffix "..." x <|> S8.stripSuffix ".." x)
