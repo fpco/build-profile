@@ -127,8 +127,11 @@ lineFileSource fp = CB.sourceFile fp .| lineSource
 
 lineSource :: ConduitT ByteString Line (ResourceT IO) ()
 lineSource =
-  CB.lines .| CL.mapM (\x -> lift (print x) >> pure x) .|
-  CL.mapM (either error pure . Atto.parseOnly lineParser)
+  CB.lines .| debug .| CL.mapM (either error pure . Atto.parseOnly lineParser)
+  where
+    debug
+      | True = CL.map id
+      | otherwise = CL.mapM (\x -> lift (print x) >> pure x)
 
 lineParser :: Atto.Parser Line
 lineParser = do
