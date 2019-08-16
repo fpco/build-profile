@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ApplicativeDo #-}
@@ -26,6 +27,7 @@ import qualified Data.Conduit.List as CL
 import           Data.Maybe
 import           Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import           Data.Time
 import           Database.Persist.Sqlite
 import           Database.Persist.TH
@@ -38,11 +40,12 @@ share
 Measurement
   title Text
   timestamp UTCTime
+  duration Double
   package Text
   stanza Text
   module Text
   verb Text
-  UniqueMeasurementTitle title
+  deriving Show
 |]
 
 data Config =
@@ -80,6 +83,135 @@ main = do
   runSqlite (configSqliteFile config) (runMigration migrateAll)
 
 --------------------------------------------------------------------------------
+-- Collector of measurements
+
+data State =
+  State
+    { statePackageNameVer :: !(Maybe PackageNameVer)
+    , stateStanzaName :: !(Maybe StanzaName)
+    , stateModuleName :: !(Maybe ModuleName)
+    , statePackageStart :: !(Maybe UTCTime)
+    }
+
+collectMeasurements :: Monad m => Text -> ConduitT Line Measurement m ()
+collectMeasurements measurementTitle =
+  collect
+    State
+      { statePackageStart = Nothing
+      , stateStanzaName = Nothing
+      , stateModuleName = Nothing
+      , statePackageNameVer = Nothing
+      } .|
+  diff Nothing
+  where
+    collect state = do
+      mline <- await
+      case mline of
+        Nothing -> pure ()
+        Just line ->
+          case lineVerb line of
+            Configuring packageNameVer -> do
+              produce state'
+              collect state'
+              where state' =
+                      State
+                        { statePackageStart = Just (lineTimestamp line)
+                        , stateStanzaName = Nothing
+                        , stateModuleName = Nothing
+                        , statePackageNameVer = Just packageNameVer
+                        }
+            Registering ->
+              case statePackageStart state of
+                Nothing -> pure ()
+                Just packageStart -> do
+                  yield
+                    ( lineTimestamp line
+                    , \_ ->
+                        Measurement
+                          { measurementTitle
+                          , measurementTimestamp = packageStart
+                          , measurementDuration =
+                              realToFrac
+                                (diffUTCTime (lineTimestamp line) packageStart)
+                          , measurementPackage =
+                              maybe
+                                ""
+                                (T.decodeUtf8 . unPackageNameVer)
+                                (statePackageNameVer state)
+                          , measurementStanza = ""
+                          , measurementModule = ""
+                          , measurementVerb = "build-package"
+                          })
+                  collect
+                    State
+                      { statePackageNameVer = Nothing
+                      , stateStanzaName = Nothing
+                      , stateModuleName = Nothing
+                      , statePackageStart = Nothing
+                      }
+            BuildingLibrary ->
+              collect
+                state
+                  { stateStanzaName = Just (StanzaName "library")
+                  , stateModuleName = Nothing
+                  }
+            BuildingStanza stanzaName ->
+              collect state {stateStanzaName = Just stanzaName}
+            Compiling moduleName -> do
+              produce state'
+              collect state'
+              where state' = state {stateModuleName = Just moduleName}
+            Linking _file -> do
+              produce state'
+              collect state'
+              where state' = state {stateModuleName = Nothing}
+            Unknown -> do
+              produce state
+              collect state
+          where produce state' =
+                  yield
+                    ( lineTimestamp line
+                    , (\computeDuration ->
+                         Measurement
+                           { measurementTitle
+                           , measurementTimestamp = lineTimestamp line
+                           , measurementDuration =
+                               computeDuration (lineTimestamp line)
+                           , measurementPackage =
+                               maybe
+                                 ""
+                                 (T.decodeUtf8 . unPackageNameVer)
+                                 (statePackageNameVer state')
+                           , measurementStanza =
+                               maybe
+                                 ""
+                                 (T.decodeUtf8 . unStanzaName)
+                                 (stateStanzaName state')
+                           , measurementModule =
+                               maybe
+                                 ""
+                                 (T.decodeUtf8 . unModuleName)
+                                 (stateModuleName state')
+                           , measurementVerb =
+                               case lineVerb line of
+                                 Configuring {} -> "configure"
+                                 Registering {} -> "register"
+                                 BuildingLibrary -> "build-library"
+                                 BuildingStanza {} -> "build-stanza"
+                                 Compiling {} -> "compile"
+                                 Linking {} -> "link"
+                                 Unknown {} -> "unknown"
+                           }))
+    diff mprev = do
+      mmeasure <- await
+      case mmeasure of
+        Nothing -> pure ()
+        Just (timestamp, makeMeasurement) -> do
+          maybe (pure ()) (yield . makeMeasurement . compute) mprev
+          diff (Just timestamp)
+          where compute before after = realToFrac (diffUTCTime after before)
+
+--------------------------------------------------------------------------------
 -- SAX lexer
 
 data Line =
@@ -95,14 +227,9 @@ data Verb
   | BuildingStanza StanzaName
   | Compiling ModuleName
   | Linking FilePath
+  | Registering
   | Unknown
   deriving (Show)
-
-data Context =
-  Context
-    { contextPackageNameVar :: !(Maybe PackageNameVer)
-    , contextModuleName :: !(Maybe ModuleName)
-    }
 
 newtype PackageNameVer =
   PackageNameVer
@@ -156,6 +283,7 @@ verbParser =
     , buildingstanza
     , compiling
     , linking
+    , registering
     , unknown
     ]
   where
@@ -167,7 +295,7 @@ verbParser =
       pure BuildingLibrary
     buildingstanza = do
       Atto.string "Building "
-      Atto.skipWhile (/='\'')
+      Atto.skipWhile (/= '\'')
       Atto.char '\''
       BuildingStanza <$> stanzaNameParser
     compiling = do
@@ -179,6 +307,9 @@ verbParser =
     linking = do
       _ <- Atto.string "Linking "
       Linking . S8.unpack . stripEllipsis <$> Atto.takeByteString
+    registering = do
+      _ <- Atto.string "Registering "
+      pure Registering
     unknown = pure Unknown
 
 packageNameVerParser :: Atto.Parser PackageNameVer
