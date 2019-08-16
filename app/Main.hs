@@ -14,24 +14,19 @@
 module Main where
 
 
-import           Control.Monad.Catch
 import           Control.Monad.Trans
 import           Control.Monad.Trans.Resource
 import qualified Data.Attoparsec.ByteString.Char8 as Atto
 import           Data.ByteString (ByteString)
-import qualified Data.ByteString as S
 import qualified Data.ByteString.Char8 as S8
 import           Data.Char
 import           Data.Conduit
-import           Data.Conduit.Attoparsec
 import qualified Data.Conduit.Binary as CB
 import qualified Data.Conduit.List as CL
 import           Data.Maybe
 import           Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
 import           Data.Time
-import           Database.Persist
 import           Database.Persist.Sqlite
 import           Database.Persist.TH
 import           Options.Applicative
@@ -60,7 +55,7 @@ data Config =
 -- | Main entry point.
 main :: IO ()
 main = do
-  (config, runCmd) <-
+  (config, ()) <-
     simpleOptions
       "0"
       "build-profile"
@@ -83,6 +78,9 @@ main = do
           pure Config {..})
       (pure ())
   runSqlite (configSqliteFile config) (runMigration migrateAll)
+
+--------------------------------------------------------------------------------
+-- SAX lexer
 
 data Line =
   Line
@@ -159,7 +157,7 @@ verbParser =
     ]
   where
     configuring = do
-      Atto.string "Configuring "
+      _ <- Atto.string "Configuring "
       Configuring <$> packageNameVerParser
     buildinglibrary = do
       Atto.string "Building library"
@@ -176,20 +174,24 @@ verbParser =
       Atto.string " Compiling "
       Compiling <$> moduleNameParser
     linking = do
-      Atto.string "Linking "
+      _ <- Atto.string "Linking "
       Linking . S8.unpack . stripEllipsis <$> Atto.takeByteString
     unknown = pure Unknown
 
+packageNameVerParser :: Atto.Parser PackageNameVer
 packageNameVerParser =
   (PackageNameVer . stripEllipsis) <$>
   Atto.takeWhile1 (\c -> isAlphaNum c || elem c ("-.":: [Char]))
 
+stanzaNameParser :: Atto.Parser StanzaName
 stanzaNameParser =
   (StanzaName . stripEllipsis) <$>
   Atto.takeWhile1 (\c -> isAlphaNum c || elem c ("-_" :: [Char]))
 
+moduleNameParser :: Atto.Parser ModuleName
 moduleNameParser =
   (ModuleName . stripEllipsis) <$>
   Atto.takeWhile1 (\c -> isAlphaNum c || isUpper c || elem c ("_'.":: [Char]))
 
+stripEllipsis :: ByteString -> ByteString
 stripEllipsis x = fromMaybe x (S8.stripSuffix "..." x <|> S8.stripSuffix ".." x)
