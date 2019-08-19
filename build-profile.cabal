@@ -1,0 +1,35 @@
+cabal-version: 1.12
+name:           build-profile
+version:        0.1.0.0
+description:    Please see the README on GitHub at <https://github.com/githubuser/build-profile#readme>
+homepage:       https://github.com/githubuser/build-profile#readme
+bug-reports:    https://github.com/githubuser/build-profile/issues
+author:         FP Complete
+copyright:      2019 FP Complete
+license:        BSD3
+build-type:     Simple
+
+executable build-profile
+  main-is: Main.hs
+  other-modules:
+      Paths_build_profile
+  hs-source-dirs:
+      app
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N -Wall
+  build-depends:
+      base >=4.7 && <5,
+      conduit,
+      conduit-extra,
+      attoparsec,
+      persistent,
+      persistent-template,
+      persistent-sqlite,
+      optparse-applicative,
+      optparse-simple,
+      text,
+      bytestring,
+      time,
+      exceptions,
+      resourcet,
+      mtl
+  default-language: Haskell2010
