@@ -89,19 +89,16 @@ main = do
   cmd
   where
     generate config = do
-      runSqlite (configSqliteFile config) (runMigration migrateAll)
-      mapM_
-        (\fp ->
-           runConduitRes
-             (lineFileSource fp .| collectMeasurements (configTitle config) .|
-              CL.mapM_
-                (\measurement ->
-                   runSqlite
-                     (configSqliteFile config)
-                     (do asTypeOf
-                           (insert_ measurement)
-                           (runMigration migrateAll)))))
-        (configLogFiles config)
+      runSqlite
+        (configSqliteFile config)
+        (do runMigration migrateAll
+            mapM_
+              (\fp ->
+                 runConduitRes
+                   (lineFileSource fp .|
+                    collectMeasurements (configTitle config) .|
+                    CL.mapM_ (lift . insert_)))
+              (configLogFiles config))
 
 --------------------------------------------------------------------------------
 -- Collector of measurements
@@ -281,16 +278,16 @@ newtype StanzaName =
     }
   deriving (Show)
 
-lineFileSource :: FilePath -> ConduitT () Line (ResourceT IO) ()
+lineFileSource :: MonadResource m => FilePath -> ConduitT () Line m ()
 lineFileSource fp = CB.sourceFile fp .| lineSource
 
-lineSource :: ConduitT ByteString Line (ResourceT IO) ()
+lineSource :: MonadIO m => ConduitT ByteString Line m ()
 lineSource =
   CB.lines .| debug .| CL.mapM (either error pure . Atto.parseOnly lineParser)
   where
     debug
       | True = CL.map id
-      | otherwise = CL.mapM (\x -> lift (print x) >> pure x)
+      | otherwise = CL.mapM (\x -> liftIO (print x) >> pure x)
 
 lineParser :: Atto.Parser Line
 lineParser = do
